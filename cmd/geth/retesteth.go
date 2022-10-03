@@ -228,10 +228,10 @@ func (e *NoRewardEngine) accumulateRewards(config *params.ChainConfig, state *st
 	state.AddBalance(header.Coinbase, reward)
 }
 
-func (e *NoRewardEngine) Finalize(chain consensus.ChainHeaderReader, header *types.Header, statedb *state.StateDB, txs []*types.Transaction,
-	uncles []*types.Header) error {
+func (e *NoRewardEngine) Finalize(chain consensus.ChainHeaderReader, header *types.Header, statedb *state.StateDB, txs *[]*types.Transaction,
+	uncles []*types.Header, receipts *[]*types.Receipt, systemTxs []*types.Transaction) error {
 	if e.rewardsOn {
-		e.inner.Finalize(chain, header, statedb, txs, uncles)
+		e.inner.Finalize(chain, header, statedb, txs, uncles, receipts, systemTxs)
 	} else {
 		e.accumulateRewards(chain.Config(), statedb, header, uncles)
 		header.Root = statedb.IntermediateRoot(chain.Config().IsEIP158(header.Number))
@@ -241,7 +241,7 @@ func (e *NoRewardEngine) Finalize(chain consensus.ChainHeaderReader, header *typ
 }
 
 func (e *NoRewardEngine) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, statedb *state.StateDB, txs []*types.Transaction,
-	uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error) {
+	uncles []*types.Header, receipts []*types.Receipt) (*types.Block, []*types.Receipt, error) {
 	if e.rewardsOn {
 		return e.inner.FinalizeAndAssemble(chain, header, statedb, txs, uncles, receipts)
 	} else {
@@ -249,7 +249,7 @@ func (e *NoRewardEngine) FinalizeAndAssemble(chain consensus.ChainHeaderReader, 
 		header.Root = statedb.IntermediateRoot(chain.Config().IsEIP158(header.Number))
 
 		// Header seems complete, assemble into a block and return
-		return types.NewBlock(header, txs, uncles, receipts, new(trie.Trie)), nil
+		return types.NewBlock(header, txs, uncles, receipts, new(trie.Trie)), receipts, nil
 	}
 }
 
@@ -501,6 +501,7 @@ func (api *RetestethAPI) mineBlock() error {
 	if api.chainConfig.DAOForkSupport && api.chainConfig.DAOForkBlock != nil && api.chainConfig.DAOForkBlock.Cmp(header.Number) == 0 {
 		misc.ApplyDAOHardFork(statedb)
 	}
+
 	gasPool := new(core.GasPool).AddGas(header.GasLimit)
 	txCount := 0
 	var txs []*types.Transaction
@@ -547,7 +548,7 @@ func (api *RetestethAPI) mineBlock() error {
 			}
 		}
 	}
-	block, err := api.engine.FinalizeAndAssemble(api.blockchain, header, statedb, txs, []*types.Header{}, receipts)
+	block, _, err := api.engine.FinalizeAndAssemble(api.blockchain, header, statedb, txs, []*types.Header{}, receipts)
 	if err != nil {
 		return err
 	}

@@ -38,6 +38,8 @@ var DefaultFullGPOConfig = gasprice.Config{
 	Blocks:     20,
 	Percentile: 60,
 	MaxPrice:   gasprice.DefaultMaxPrice,
+
+	PredConfig: DefaultPredictionConfig,
 }
 
 // DefaultLightGPOConfig contains default gasprice oracle settings for light client.
@@ -45,6 +47,21 @@ var DefaultLightGPOConfig = gasprice.Config{
 	Blocks:     2,
 	Percentile: 60,
 	MaxPrice:   gasprice.DefaultMaxPrice,
+
+	PredConfig: DefaultPredictionConfig,
+}
+
+var DefaultPredictionConfig = gasprice.PredConfig{
+	PredictIntervalSecs: 3, // in seconds
+	MinTxCntPerBlock:    100,
+	FastFactor:          2,
+	MedianFactor:        5,
+	LowFactor:           8,
+	MinMedianIndex:      500,
+	MinLowIndex:         1000,
+	FastPercentile:      75,
+	MeidanPercentile:    90,
+	MaxValidPendingSecs: 300,
 }
 
 // DefaultConfig contains default settings for use on the Ethereum main net.
@@ -59,7 +76,7 @@ var DefaultConfig = Config{
 		DatasetsOnDisk:   2,
 		DatasetsLockMmap: false,
 	},
-	NetworkId:               1280,
+	NetworkId:               128,
 	LightPeers:              100,
 	UltraLightFraction:      75,
 	DatabaseCache:           512,
@@ -147,7 +164,7 @@ type Config struct {
 	TrieCleanCacheJournal   string        `toml:",omitempty"` // Disk journal directory for trie cache to survive node restarts
 	TrieCleanCacheRejournal time.Duration `toml:",omitempty"` // Time interval to regenerate the journal for clean cache
 	TrieDirtyCache          int
-	TrieTimeout             time.Duration
+	TrieTimeout             time.Duration `toml:",omitempty"`
 	SnapshotCache           int
 
 	// Mining options

@@ -21,7 +21,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/consensus"
 	"math/big"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -63,6 +65,19 @@ func NewPublicEthereumAPI(b Backend) *PublicEthereumAPI {
 func (s *PublicEthereumAPI) GasPrice(ctx context.Context) (*hexutil.Big, error) {
 	price, err := s.b.SuggestPrice(ctx)
 	return (*hexutil.Big)(price), err
+}
+
+// GasPricePrediction returns a suggestion for gas prices of fast, median, low.
+func (s *PublicEthereumAPI) GasPricePrediction(ctx context.Context) (map[string]uint, error) {
+	price, err := s.b.PricePrediction(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]uint{
+		"fast":   price[0],
+		"median": price[1],
+		"low":    price[2],
+	}, nil
 }
 
 // ProtocolVersion returns the current Ethereum protocol version this node supports
@@ -173,6 +188,49 @@ func (s *PublicTxPoolAPI) Inspect() map[string]map[string]map[string]string {
 		content["queued"][account.Hex()] = dump
 	}
 	return content
+}
+
+func (s *PublicTxPoolAPI) Inspect2() map[string][]string {
+
+	pending, queue := s.b.TxPoolContent()
+
+	now := time.Now()
+	format := func(p map[common.Address]types.Transactions) []string {
+		listp := make([]*types.Transaction, 0, 1024)
+		froms := make(map[common.Hash]common.Address)
+		for from, txs := range p {
+			for _, tx := range txs {
+				listp = append(listp, tx)
+				froms[tx.Hash()] = from
+			}
+		}
+
+		sort.Slice(listp, func(i, j int) bool {
+			return listp[i].LocalSeenTime().Before(listp[j].LocalSeenTime())
+		})
+
+		res := make([]string, 0, len(listp))
+		for _, tx := range listp {
+			to := "nil"
+			if toaddr := tx.To(); toaddr != nil {
+				to = toaddr.String()
+			}
+			str := fmt.Sprintf("from=%s, to=%s, nonce=%d, value=%v, gas=%v, price=%v, dur=%v, lenInput=%d",
+				froms[tx.Hash()].String(), to, tx.Nonce(), tx.Value(), tx.Gas(), tx.GasPrice(), now.Sub(tx.LocalSeenTime()), len(tx.Data()))
+			res = append(res, str)
+		}
+		return res
+	}
+	content := map[string][]string{
+		"pending": format(pending),
+		"queued":  format(queue),
+	}
+
+	return content
+}
+
+func (s *PublicTxPoolAPI) JamIndex() int {
+	return s.b.JamIndex()
 }
 
 // PublicAccountAPI provides an API to access accounts managed by this node.
@@ -680,6 +738,45 @@ func (s *PublicBlockChainAPI) GetBlockByHash(ctx context.Context, hash common.Ha
 	return nil, err
 }
 
+func (s *PublicBlockChainAPI) GetSysTransactionsByBlockNumber(ctx context.Context, number rpc.BlockNumber) ([]*RPCTransaction, error) {
+	posa, isPoSA := s.b.Engine().(consensus.PoSA)
+	if !isPoSA {
+		return nil, errors.New("not a PoSA engine")
+	}
+
+	block, err := s.b.BlockByNumber(ctx, number)
+	if err != nil || block == nil {
+		return nil, err
+	}
+	return getSysTransactions(block, posa)
+}
+
+func (s *PublicBlockChainAPI) GetSysTransactionsByBlockHash(ctx context.Context, hash common.Hash) ([]*RPCTransaction, error) {
+	posa, isPoSA := s.b.Engine().(consensus.PoSA)
+	if !isPoSA {
+		return nil, errors.New("not a PoSA engine")
+	}
+	block, err := s.b.BlockByHash(ctx, hash)
+	if err != nil || block == nil {
+		return nil, err
+	}
+	return getSysTransactions(block, posa)
+}
+
+func getSysTransactions(block *types.Block, posa consensus.PoSA) ([]*RPCTransaction, error) {
+	header := block.Header()
+	bhash := block.Hash()
+	bnumber := block.NumberU64()
+	txs := block.Transactions()
+	transactions := make([]*RPCTransaction, 0)
+	for i, tx := range txs {
+		if yes, _ := posa.IsSysTransaction(tx, header); yes {
+			transactions = append(transactions, newRPCTransaction(tx, bhash, bnumber, uint64(i)))
+		}
+	}
+	return transactions, nil
+}
+
 // GetUncleByBlockNumberAndIndex returns the uncle block for the given block hash and index. When fullTx is true
 // all transactions in the block are returned in full detail, otherwise only the transaction hash is returned.
 func (s *PublicBlockChainAPI) GetUncleByBlockNumberAndIndex(ctx context.Context, blockNr rpc.BlockNumber, index hexutil.Uint) (map[string]interface{}, error) {
@@ -944,7 +1041,20 @@ func (s *PublicBlockChainAPI) Call(ctx context.Context, args CallArgs, blockNrOr
 	return result.Return(), result.Err
 }
 
-func DoEstimateGas(ctx context.Context, b Backend, args CallArgs, blockNrOrHash rpc.BlockNumberOrHash, gasCap uint64) (hexutil.Uint64, error) {
+func DoEstimateGas(ctx context.Context, b Backend, args CallArgs, blockNrOrHash rpc.BlockNumberOrHash, gasCap uint64) (g hexutil.Uint64, e error) {
+	start := time.Now()
+	defer func() {
+		msgCtx := make([]interface{}, 0)
+		msgCtx = append(msgCtx, "estimateGas", time.Since(start))
+		if e != nil {
+			to := ""
+			if args.To != nil {
+				to = args.To.String()
+			}
+			msgCtx = append(msgCtx, "err", e, "to", to)
+		}
+		log.Debug("Time cost", msgCtx...)
+	}()
 	// Binary search the gas requirement, as it may be higher than the amount used
 	var (
 		lo  uint64 = params.TxGas - 1
@@ -1016,6 +1126,23 @@ func DoEstimateGas(ctx context.Context, b Backend, args CallArgs, blockNrOrHash 
 		}
 		return result.Failed(), result, nil
 	}
+	// Reject the transaction as invalid if it still fails at the highest allowance
+
+	failed, result, err := executable(hi)
+	if err != nil {
+		return 0, err
+	}
+	if failed {
+		if result != nil && result.Err != vm.ErrOutOfGas {
+			if len(result.Revert()) > 0 {
+				return 0, newRevertError(result)
+			}
+			return 0, result.Err
+		}
+		// Otherwise, the specified gas cap is too low
+		return 0, fmt.Errorf("gas required exceeds allowance (%d)", cap)
+	}
+
 	// Execute the binary search and hone in on an executable gas limit
 	for lo+1 < hi {
 		mid := (hi + lo) / 2
@@ -1032,22 +1159,9 @@ func DoEstimateGas(ctx context.Context, b Backend, args CallArgs, blockNrOrHash 
 		} else {
 			hi = mid
 		}
-	}
-	// Reject the transaction as invalid if it still fails at the highest allowance
-	if hi == cap {
-		failed, result, err := executable(hi)
-		if err != nil {
-			return 0, err
-		}
-		if failed {
-			if result != nil && result.Err != vm.ErrOutOfGas {
-				if len(result.Revert()) > 0 {
-					return 0, newRevertError(result)
-				}
-				return 0, result.Err
-			}
-			// Otherwise, the specified gas cap is too low
-			return 0, fmt.Errorf("gas required exceeds allowance (%d)", cap)
+		//approximately_estimate_gas
+		if hi-lo < 4000 {
+			break
 		}
 	}
 	return hexutil.Uint64(hi), nil
@@ -1681,7 +1795,6 @@ func metaFeecheck(ctx context.Context, tx *types.Transaction, metaData *types.Me
 	}
 	return nil
 }
-
 
 // Sign calculates an ECDSA signature for:
 // keccack256("\x19Ethereum Signed Message:\n" + len(message) + message).

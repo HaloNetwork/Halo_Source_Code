@@ -94,8 +94,8 @@ type Engine interface {
 	//
 	// Note: The block header and state database might be updated to reflect any
 	// consensus rules that happen at finalization (e.g. block rewards).
-	Finalize(chain ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction,
-		uncles []*types.Header) error
+	Finalize(chain ChainHeaderReader, header *types.Header, state *state.StateDB, txs *[]*types.Transaction,
+		uncles []*types.Header, receipts *[]*types.Receipt, systemTxs []*types.Transaction) error
 
 	// FinalizeAndAssemble runs any post-transaction state modifications (e.g. block
 	// rewards) and assembles the final block.
@@ -103,7 +103,7 @@ type Engine interface {
 	// Note: The block header and state database might be updated to reflect any
 	// consensus rules that happen at finalization (e.g. block rewards).
 	FinalizeAndAssemble(chain ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction,
-		uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error)
+		uncles []*types.Header, receipts []*types.Receipt) (*types.Block, []*types.Receipt, error)
 
 	// Seal generates a new sealing request for the given input block and pushes
 	// the result into the given channel.
@@ -132,4 +132,28 @@ type PoW interface {
 
 	// Hashrate returns the current mining hashrate of a PoW consensus engine.
 	Hashrate() float64
+}
+
+// PoSA is a consensus engine based on proof-of-stake-authority.
+type PoSA interface {
+	Engine
+
+	// PreHandle runs any pre-transaction state modifications (e.g. apply hard fork rules).
+	//
+	// Note: The block header and state database might be updated to reflect any
+	// consensus rules that happen at pre-handling.
+	PreHandle(chain ChainHeaderReader, header *types.Header, state *state.StateDB) error
+
+	// IsSysTransaction checks whether a specific transaction is a system transaction.
+	IsSysTransaction(tx *types.Transaction, header *types.Header) (bool, error)
+
+	// CanCreate determines where a given address can create a new contract.
+	CanCreate(state StateReader, addr common.Address, height *big.Int) bool
+
+	// ValidateTx do a consensus-related validation on the given transaction at the given header and state.
+	ValidateTx(tx *types.Transaction, header *types.Header, parentState *state.StateDB) error
+}
+
+type StateReader interface {
+	GetState(addr common.Address, hash common.Hash) common.Hash
 }

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"math/big"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,7 +28,6 @@ import (
 	mapset "github.com/deckarep/golang-set"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
-	"github.com/ethereum/go-ethereum/consensus/misc"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -129,6 +129,10 @@ type worker struct {
 	eth         Backend
 	chain       *core.BlockChain
 
+	// Is the engine a PoSA engine?
+	posa   consensus.PoSA
+	isPoSA bool
+
 	// Feeds
 	pendingLogsFeed event.Feed
 
@@ -188,10 +192,13 @@ type worker struct {
 }
 
 func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, isLocalBlock func(*types.Block) bool, init bool) *worker {
+	posa, isPoSA := engine.(consensus.PoSA)
 	worker := &worker{
 		config:             config,
 		chainConfig:        chainConfig,
 		engine:             engine,
+		isPoSA:             isPoSA,
+		posa:               posa,
 		eth:                eth,
 		mux:                mux,
 		chain:              eth.BlockChain(),
@@ -789,6 +796,15 @@ func (w *worker) commitTransactions(txs *types.TransactionsByPriceAndNonce, coin
 			txs.Pop()
 			continue
 		}
+		// consensus related validation
+		if w.isPoSA {
+			err := w.posa.ValidateTx(tx, w.current.header, w.current.state)
+			if err != nil {
+				log.Trace("Ignoring consensus invalid transaction", "hash", tx.Hash().String(), "from", from.String(), "to", tx.To(), "err", err)
+				txs.Pop()
+				continue
+			}
+		}
 		// Start executing the transaction
 		w.current.state.Prepare(tx.Hash(), common.Hash{}, w.current.tcount)
 
@@ -905,8 +921,11 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 	}
 	// Create the current work task and check any fork transitions needed
 	env := w.current
-	if w.chainConfig.DAOForkSupport && w.chainConfig.DAOForkBlock != nil && w.chainConfig.DAOForkBlock.Cmp(header.Number) == 0 {
-		misc.ApplyDAOHardFork(env.state)
+	if w.isPoSA {
+		if err := w.posa.PreHandle(w.chain, header, env.state); err != nil {
+			log.Error("Failed to apply system contract upgrade", "err", err)
+			return
+		}
 	}
 	// Accumulate the uncles for the current block
 	uncles := make([]*types.Header, 0, 2)
@@ -979,9 +998,12 @@ func (w *worker) commitNewWork(interrupt *int32, noempty bool, timestamp int64) 
 // and commits new work if consensus engine is running.
 func (w *worker) commit(uncles []*types.Header, interval func(), update bool, start time.Time) error {
 	// Deep copy receipts here to avoid interaction between different tasks.
-	receipts := copyReceipts(w.current.receipts)
+	cpyReceipts := copyReceipts(w.current.receipts)
+	// copy transactions to a new slice to avoid interaction between different tasks.
+	txs := make([]*types.Transaction, len(w.current.txs))
+	copy(txs, w.current.txs)
 	s := w.current.state.Copy()
-	block, err := w.engine.FinalizeAndAssemble(w.chain, w.current.header, s, w.current.txs, uncles, receipts)
+	block, receipts, err := w.engine.FinalizeAndAssemble(w.chain, w.current.header, s, txs, uncles, cpyReceipts)
 	if err != nil {
 		return err
 	}
@@ -1027,6 +1049,18 @@ func (w *worker) postSideBlock(event core.ChainSideEvent) {
 
 // totalFees computes total consumed fees in ETH. Block transactions and receipts have to have the same order.
 func totalFees(block *types.Block, receipts []*types.Receipt) *big.Float {
+	if len(block.Transactions()) != len(receipts) {
+		// for debug
+		log.Error("transactions len != receipts len", "blockHash", block.Hash().String(), "number", block.Number())
+		for i, tx := range block.Transactions() {
+			js, _ := tx.MarshalJSON()
+			log.Error("tx", strconv.Itoa(i), string(js))
+		}
+		for i, receipt := range receipts {
+			js, _ := receipt.MarshalJSON()
+			log.Error("receipt", strconv.Itoa(i), string(js))
+		}
+	}
 	feesWei := new(big.Int)
 	for i, tx := range block.Transactions() {
 		feesWei.Add(feesWei, new(big.Int).Mul(new(big.Int).SetUint64(receipts[i].GasUsed), tx.GasPrice()))

@@ -44,6 +44,7 @@ type EthAPIBackend struct {
 	extRPCEnabled bool
 	eth           *Ethereum
 	gpo           *gasprice.Oracle
+	gpp           *gasprice.Prediction
 }
 
 // ChainConfig returns the active chain configuration.
@@ -259,6 +260,10 @@ func (b *EthAPIBackend) TxPoolContent() (map[common.Address]types.Transactions, 
 	return b.eth.TxPool().Content()
 }
 
+func (b *EthAPIBackend) JamIndex() int {
+	return b.eth.TxPool().JamIndex()
+}
+
 func (b *EthAPIBackend) TxPool() *core.TxPool {
 	return b.eth.TxPool()
 }
@@ -277,6 +282,10 @@ func (b *EthAPIBackend) ProtocolVersion() int {
 
 func (b *EthAPIBackend) SuggestPrice(ctx context.Context) (*big.Int, error) {
 	return b.gpo.SuggestPrice(ctx)
+}
+
+func (b *EthAPIBackend) PricePrediction(ctx context.Context) ([]uint, error) {
+	return b.gpp.CurrentPrices(), nil
 }
 
 func (b *EthAPIBackend) ChainDb() ethdb.Database {

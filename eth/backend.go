@@ -185,15 +185,18 @@ func New(stack *node.Node, config *Config) (*Ethereum, error) {
 	}
 	eth.bloomIndexer.Start(eth.blockchain)
 
-	// set state fn if consensus engine is congress.
-	if congressEngine, ok := eth.engine.(*congress.Congress); ok {
-		congressEngine.SetStateFn(eth.blockchain.StateAt)
-	}
-
 	if config.TxPool.Journal != "" {
 		config.TxPool.Journal = stack.ResolvePath(config.TxPool.Journal)
 	}
 	eth.txPool = core.NewTxPool(config.TxPool, chainConfig, eth.blockchain)
+
+	// do some extra work if consensus engine is congress.
+	if congressEngine, ok := eth.engine.(*congress.Congress); ok {
+		// set state fn
+		congressEngine.SetStateFn(eth.blockchain.StateAt)
+		// set consensus-related transaction validator
+		eth.txPool.InitExTxValidator(congressEngine)
+	}
 
 	// Permit the downloader to use the trie cache allowance during fast sync
 	cacheLimit := cacheConfig.TrieCleanLimit + cacheConfig.TrieDirtyLimit + cacheConfig.SnapshotLimit
@@ -207,7 +210,7 @@ func New(stack *node.Node, config *Config) (*Ethereum, error) {
 	eth.miner = miner.New(eth, &config.Miner, chainConfig, eth.EventMux(), eth.engine, eth.isLocalBlock)
 	eth.miner.SetExtra(makeExtraData(config.Miner.ExtraData))
 
-	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), eth, nil}
+	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), eth, nil, nil}
 	gpoParams := config.GPO
 	if gpoParams.Default == nil {
 		gpoParams.Default = config.Miner.GasPrice
@@ -226,7 +229,51 @@ func New(stack *node.Node, config *Config) (*Ethereum, error) {
 	stack.RegisterAPIs(eth.APIs())
 	stack.RegisterProtocols(eth.Protocols())
 	stack.RegisterLifecycle(eth)
+
+	// gas price prediction
+	gppCfg := checkPricePredictionConfig(&gpoParams)
+	eth.APIBackend.gpp = gasprice.NewPrediction(*gppCfg, eth.APIBackend, eth.txPool)
+
 	return eth, nil
+}
+
+func checkPricePredictionConfig(cfg *gasprice.Config) *gasprice.Config {
+	if cfg == nil {
+		cfg1 := DefaultFullGPOConfig
+		return &cfg1
+	}
+	if cfg.PredictIntervalSecs == 0 {
+		cfg.PredictIntervalSecs = DefaultFullGPOConfig.PredictIntervalSecs
+	}
+	if cfg.MinTxCntPerBlock == 0 {
+		cfg.MinTxCntPerBlock = DefaultFullGPOConfig.MinTxCntPerBlock
+	}
+
+	if cfg.MinMedianIndex == 0 {
+		cfg.MinMedianIndex = DefaultFullGPOConfig.MinMedianIndex
+	}
+	if cfg.MinLowIndex == 0 {
+		cfg.MinLowIndex = DefaultFullGPOConfig.MinLowIndex
+	}
+	if cfg.FastPercentile == 0 {
+		cfg.FastPercentile = DefaultFullGPOConfig.FastPercentile
+	}
+	if cfg.MeidanPercentile == 0 {
+		cfg.MeidanPercentile = DefaultFullGPOConfig.MeidanPercentile
+	}
+	if cfg.FastFactor == 0 {
+		cfg.FastFactor = DefaultFullGPOConfig.FastFactor
+	}
+	if cfg.MedianFactor == 0 {
+		cfg.MedianFactor = DefaultFullGPOConfig.MedianFactor
+	}
+	if cfg.LowFactor == 0 {
+		cfg.LowFactor = DefaultFullGPOConfig.LowFactor
+	}
+	if cfg.MaxValidPendingSecs == 0 {
+		cfg.MaxValidPendingSecs = DefaultFullGPOConfig.MaxValidPendingSecs
+	}
+	return cfg
 }
 
 func makeExtraData(extra []byte) []byte {
@@ -476,7 +523,7 @@ func (s *Ethereum) StartMining(threads int) error {
 				log.Error("Etherbase account unavailable locally", "err", err)
 				return fmt.Errorf("signer missing: %v", err)
 			}
-			congress.Authorize(eb, wallet.SignData)
+			congress.Authorize(eb, wallet.SignData, wallet.SignTx)
 		}
 		// If mining is started, we can disable the transaction rejection mechanism
 		// introduced to speed sync times.

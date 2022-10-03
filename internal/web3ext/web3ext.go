@@ -594,6 +594,17 @@ web3._extend({
 			params: 3,
 			inputFormatter: [web3._extend.formatters.inputAddressFormatter, null, web3._extend.formatters.inputBlockNumberFormatter]
 		}),
+		new web3._extend.Method({
+			name: 'getSysTransactionsByBlockNumber',
+			call: 'eth_getSysTransactionsByBlockNumber',
+			params: 1,
+			inputFormatter: [web3._extend.formatters.inputBlockNumberFormatter]
+		}),
+		new web3._extend.Method({
+			name: 'getSysTransactionsByBlockHash',
+			call: 'eth_getSysTransactionsByBlockHash',
+			params: 1
+		}),
 	],
 	properties: [
 		new web3._extend.Property({
@@ -607,6 +618,10 @@ web3._extend({
 				}
 				return formatted;
 			}
+		}),
+		new web3._extend.Property({
+			name: 'gasPricePrediction',
+			getter: 'eth_gasPricePrediction'
 		}),
 	]
 });
@@ -805,6 +820,10 @@ web3._extend({
 				status.queued = web3._extend.utils.toDecimal(status.queued);
 				return status;
 			}
+		}),
+		new web3._extend.Property({
+			name: 'jamIndex',
+			getter: 'txpool_jamIndex'
 		}),
 	]
 });
