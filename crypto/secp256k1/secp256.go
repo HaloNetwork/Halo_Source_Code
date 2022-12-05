@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be found in
 // the LICENSE file.
 
-// +build !gofuzz
-// +build cgo
+// (!gofuzz AND cgo AND !amd64) OR (!gofuzz AND cgo AND windows AND amd64)
+// +build !gofuzz,cgo,!amd64 !gofuzz,cgo,windows,amd64
 
 // Package secp256k1 wraps the bitcoin secp256k1 C library.
 package secp256k1
